@@ -178,10 +178,18 @@ export function questionsFor(call: ToolCall, options: QuestionOptions = {}): Jev
     [`call_${call.id}`]: {
       type: 'noul',
       instructions: `Tool call ${call.id} (${call.tool}) should stay in the history: knowing this call was made, with its input, still matters for what the assistant does next`,
+      criteria: {
+        true: 'A later step depends on remembering this call happened: it changed something, its input records a decision, or the goal refers back to it',
+        false: 'It only looked something up, or the work it belonged to is finished and nothing in the goal refers back to it',
+      },
     },
     [`result_${call.id}`]: {
       type: 'noul',
       instructions: `The full output of tool call ${call.id} (${call.tool}, ${call.resultChars} chars) should stay in the history verbatim: the assistant still needs its contents and re-running the tool would not do`,
+      criteria: {
+        true: 'The output holds something the assistant will need again and cannot get back by re-running the tool or reading a file: a one-off error, a number or fact it has not written down, a listing that changes over time',
+        false: "The output is a file's current content, routine command output, or something the assistant already restated in its own text",
+      },
     },
   };
   if (asksInput(call, options)) {

@@ -39,6 +39,21 @@ const HOOK_DEFAULTS = {
   minReductionRatio: 0.25,
   model: 'jev-1.13.0',
 };
+/**
+ * Default floors, used when the userConfig lists are unset (a fresh install
+ * reports "options not yet set"): mutations never lose their call line; paid
+ * or unrepeatable results, and the user's own answers, stay verbatim.
+ */
+export const BARIUM_LISTS = {
+  alwaysKeepCall: [
+    '^(Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|SendMessage|Artifact|Skill)$',
+    '^mcp__.*__.*(create|update|delete|send|set_|write|publish|post|move|add_|remove|merge|upload|execute|run_).*',
+  ],
+  alwaysKeepResult: [
+    '^(Agent|TaskOutput|WebFetch|WebSearch|AskUserQuestion)$',
+    '^mcp__(firecrawl|claude_ai_Ahrefs|fathom|claude_ai_Apollo_io|parallel|seo-research|higgsfield|claude_ai_Clay|qmd)__',
+  ],
+} as const;
 
 export type HookFetchInit = {
   method?: string;
@@ -107,10 +122,10 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   return config;
 }
 
-/** A floor list option: a JSON array of regex sources, or unset. Parsed per compaction so a bad value falls back instead of breaking plugin load. */
-export function patternList(options: PluginOptions, key: string): string[] {
+/** A floor list option: a JSON array of regex sources, or `fallback` when unset. Parsed per compaction so a bad value falls back instead of breaking plugin load. */
+export function patternList(options: PluginOptions, key: string, fallback: readonly string[] = []): string[] {
   const value = options[key];
-  if (typeof value !== 'string' || value.trim() === '') return [];
+  if (typeof value !== 'string' || value.trim() === '') return [...fallback];
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -322,8 +337,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const config: HookConfig = {
         ...configured,
         apiKey: await getApiKey($, configured),
-        alwaysKeepCall: patternList(options, 'alwaysKeepCall'),
-        alwaysKeepResult: patternList(options, 'alwaysKeepResult'),
+        alwaysKeepCall: patternList(options, 'alwaysKeepCall', BARIUM_LISTS.alwaysKeepCall),
+        alwaysKeepResult: patternList(options, 'alwaysKeepResult', BARIUM_LISTS.alwaysKeepResult),
       };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
         const response = await $.http.fetch(url, init);

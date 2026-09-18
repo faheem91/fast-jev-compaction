@@ -72,7 +72,8 @@ describe('hook config', () => {
 
   it('parses the floor lists as JSON arrays of regex sources', () => {
     expect(patternList({}, 'alwaysKeepCall')).toEqual([]);
-    expect(patternList({ alwaysKeepCall: '["^Bash$", "^mcp__"]' }, 'alwaysKeepCall')).toEqual(['^Bash$', '^mcp__']);
+    expect(patternList({}, 'alwaysKeepCall', ['^Bash$'])).toEqual(['^Bash$']);
+    expect(patternList({ alwaysKeepCall: '["^Bash$", "^mcp__"]' }, 'alwaysKeepCall', ['^Edit$'])).toEqual(['^Bash$', '^mcp__']);
     expect(() => patternList({ alwaysKeepCall: 'Bash' }, 'alwaysKeepCall')).toThrow(/JSON array/);
     expect(() => patternList({ alwaysKeepCall: '[1]' }, 'alwaysKeepCall')).toThrow(/JSON array/);
   });

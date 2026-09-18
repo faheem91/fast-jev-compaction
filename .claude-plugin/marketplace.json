@@ -9,7 +9,7 @@
       "name": "fast-jev-compaction",
       "source": "./",
       "description": "Verbatim Jev-guided compaction for Claude Code sessions (Barium fork: asymmetric thresholds, input truncation, tool floors).",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "license": "MIT"
     }
   ]

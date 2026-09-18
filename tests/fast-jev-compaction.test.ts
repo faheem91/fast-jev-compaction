@@ -14,6 +14,7 @@ import {
   questionsFor,
   reductionRatio,
   resolveOptions,
+  supersededCalls,
   truncateInput,
   type HistoryToolCall,
   type JevAsker,
@@ -508,6 +509,72 @@ describe('input truncation', () => {
     expect(input.o).toEqual({ k: 'z'.repeat(30) });
     expect(String(input.a).startsWith('yyyyyyyyyy\n[fast-jev-compaction truncated 20 chars')).toBe(true);
     expect(truncateInput({ a: 'short' }, 10).changed).toBe(false);
+  });
+});
+
+describe('supersession', () => {
+  const history = (): Message[] => [
+    message('user', 'start'),
+    call('r1', 'Read', { file_path: 'a.ts' }, 'v1'),
+    result('r1', 'v1'),
+    call('e1', 'Edit', { file_path: 'a.ts', old_string: 'x', new_string: 'y' }, 'ok'),
+    result('e1', 'ok'),
+    call('b1', 'Bash', { command: 'npm test' }, 'FAIL'),
+    result('b1', 'FAIL', true),
+    call('b2', 'Bash', { command: 'npm test' }, 'PASS'),
+    result('b2', 'PASS'),
+    call('r2', 'Read', { file_path: 'b.ts' }, 'b'),
+    result('r2', 'b'),
+    message('assistant', 'done'),
+  ];
+
+  it('finds reads superseded by later edits and identical calls run again', () => {
+    const calls = collectToolCalls(history(), 1);
+    expect([...supersededCalls(calls, [])].sort()).toEqual(['t1', 't3']);
+    expect([...supersededCalls(calls, [/^Bash$/])].sort()).toEqual(['t1']);
+    const partial = collectToolCalls([
+      message('user', 'start'),
+      call('p1', 'Read', { file_path: 'c.ts', offset: 1, limit: 10 }, 'x'),
+      result('p1', 'x'),
+      call('p2', 'Read', { file_path: 'c.ts', offset: 20, limit: 10 }, 'y'),
+      result('p2', 'y'),
+      message('assistant', 'done'),
+    ], 1);
+    expect(supersededCalls(partial, []).size).toBe(0);
+  });
+
+  it('decides superseded calls without asking Jev', async () => {
+    const seen: Seen[] = [];
+    const output = await compact(history(), fakeJev(() => 0.9, seen), {
+      preserveRecentMessages: 1,
+      alwaysKeepCall: ['^Bash$'],
+    });
+    expect(seen.flatMap((r) => r.questions)).toEqual(['call_t2', 'result_t2', 'call_t4', 'result_t4', 'call_t5', 'result_t5']);
+    expect(output.decisions.map((d) => [d.id, d.action, d.reason])).toEqual([
+      ['t1', 'drop_call', 'superseded'],
+      ['t2', 'keep', 'kept'],
+      ['t3', 'drop_result', 'superseded'],
+      ['t4', 'keep', 'kept'],
+      ['t5', 'keep', 'kept'],
+    ]);
+    expect(output.stats.superseded).toBe(2);
+    expect(output.messages.map((m) => m.text || m.toolUses[0]?.tool_use_id || m.toolResults?.[0]?.tool_use_id)).toEqual([
+      'start', 'e1', 'e1', 'b1', 'b1', 'b2', 'b2', 'r2', 'r2', 'done',
+    ]);
+  });
+});
+
+describe('tail retention', () => {
+  it('keeps a tail of a truncated result when truncateTailChars is set', () => {
+    const messages = transcript();
+    const calls = collectToolCalls(messages, 0);
+    const decisions = [decideCall(calls[0]!, { keepCall: 0.9, keepResult: 0.1 }, { keepThreshold: 0.5 })];
+    const kept = applyDecisions(messages, decisions, calls, 100, 0, 50);
+    const text = kept[2]?.toolResults?.[0]?.text ?? '';
+    expect(text.startsWith(fileA.slice(0, 100))).toBe(true);
+    expect(text.endsWith(fileA.slice(-50))).toBe(true);
+    expect(text).toContain(`[fast-jev-compaction truncated ${fileA.length - 150} chars of this tool result; re-run the tool if needed]`);
+    expect(resolveOptions({ truncateTailChars: 200 }).truncateTailChars).toBe(200);
   });
 });
 

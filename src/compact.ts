@@ -22,6 +22,7 @@ export const DEFAULT_OPTIONS: ResolvedCompactOptions = {
   maxStateTokens: 25_000,
   maxRequestTokens: 30_000,
   truncateHeadChars: 300,
+  truncateTailChars: 0,
   truncateInputChars: 0,
   alwaysKeepCall: [],
   alwaysKeepResult: [],
@@ -78,7 +79,86 @@ export function resolveOptions(options: CompactOptions = {}): ResolvedCompactOpt
       0,
       Math.floor(finite(options.truncateHeadChars, DEFAULT_OPTIONS.truncateHeadChars)),
     ),
+    truncateTailChars: Math.max(
+      0,
+      Math.floor(finite(options.truncateTailChars, DEFAULT_OPTIONS.truncateTailChars)),
+    ),
   };
+}
+
+const WRITERS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+
+function str(input: Record<string, unknown>, key: string): string | undefined {
+  const value = input[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function filePath(input: Record<string, unknown>): string | undefined {
+  return str(input, 'file_path') ?? str(input, 'notebook_path');
+}
+
+/** What makes two calls the same call, per tool; undefined when the tool has no such key. */
+export function identityKey(tool: string, input: Record<string, unknown>): string | undefined {
+  switch (tool) {
+    case 'Read': {
+      const path = filePath(input);
+      return path && `${path}|${String(input['offset'] ?? '')}|${String(input['limit'] ?? '')}`;
+    }
+    case 'Bash':
+    case 'PowerShell':
+      return str(input, 'command');
+    case 'Grep': {
+      const pattern = str(input, 'pattern');
+      return pattern && `${pattern}|${str(input, 'path') ?? ''}|${str(input, 'glob') ?? ''}`;
+    }
+    case 'Glob': {
+      const pattern = str(input, 'pattern');
+      return pattern && `${pattern}|${str(input, 'path') ?? ''}`;
+    }
+    case 'ToolSearch':
+      return str(input, 'query');
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Calls a later call made stale, decided without Jev: a Read whose file was
+ * later written or edited, or read again the same way; a Write whose file was
+ * later written or edited; an Edit whose file was later rewritten whole; any
+ * other call repeated identically later. Pinned calls and floored-result tools
+ * are never superseded.
+ */
+export function supersededCalls(
+  calls: readonly ToolCall[],
+  alwaysKeepResult: readonly RegExp[],
+): Set<string> {
+  const stale = new Set<string>();
+  calls.forEach((call, i) => {
+    if (call.pinned || matchesAny(alwaysKeepResult, call.tool)) return;
+    const path = filePath(call.input);
+    const key = identityKey(call.tool, call.input);
+    for (let j = i + 1; j < calls.length; j += 1) {
+      const later = calls[j]!;
+      const laterPath = filePath(later.input);
+      const sameFile = path !== undefined && laterPath === path;
+      let hit = false;
+      if (call.tool === 'Read') {
+        hit = (sameFile && WRITERS.has(later.tool)) || (later.tool === 'Read' && key !== undefined && identityKey('Read', later.input) === key);
+      } else if (call.tool === 'Write') {
+        hit = sameFile && WRITERS.has(later.tool);
+      } else if (WRITERS.has(call.tool)) {
+        hit = sameFile && later.tool === 'Write';
+      } else if (key !== undefined) {
+        hit = later.tool === call.tool && identityKey(later.tool, later.input) === key;
+      }
+      if (hit) {
+        stale.add(call.id);
+        return;
+      }
+    }
+  });
+  return stale;
 }
 
 export type QuestionOptions = Partial<Pick<ResolvedCompactOptions, 'truncateInputChars'>>;
@@ -191,6 +271,24 @@ export function decideCall(
   return { ...base, action: 'drop_call', reason: 'call_dropped' };
 }
 
+/** The decision for a superseded call: no Jev, the call line survives only on a floor, a long input is cut. */
+export function decideSuperseded(
+  call: Pick<ToolCall, 'id' | 'tool' | 'inputChars'>,
+  options: Pick<ResolvedCompactOptions, 'truncateInputChars' | 'alwaysKeepCall'>,
+): CallDecision {
+  const base = {
+    id: call.id,
+    tool: call.tool,
+    keepCall: 0,
+    keepResult: 0,
+    inputTruncated: asksInput(call, options),
+  };
+  if (matchesAny(options.alwaysKeepCall, call.tool)) {
+    return { ...base, action: 'drop_result', reason: 'superseded' };
+  }
+  return { ...base, inputTruncated: false, action: 'drop_call', reason: 'superseded' };
+}
+
 async function askBatch(
   asker: JevAsker,
   state: CompactionState,
@@ -211,12 +309,18 @@ async function askBatch(
   );
 }
 
-function truncatedResultText(text: string, isError: boolean, headChars: number): string {
-  if (text.length <= headChars + 120) return text;
+function truncatedResultText(
+  text: string,
+  isError: boolean,
+  headChars: number,
+  tailChars: number = 0,
+): string {
+  if (text.length <= headChars + tailChars + 120) return text;
   const head = headChars > 0 ? `${text.slice(0, headChars)}\n` : '';
-  return `${head}[fast-jev-compaction truncated ${text.length - headChars} chars of this tool result${
+  const tail = tailChars > 0 ? `\n${text.slice(-tailChars)}` : '';
+  return `${head}[fast-jev-compaction truncated ${text.length - headChars - tailChars} chars of this tool result${
     isError ? ' (error)' : ''
-  }; re-run the tool if needed]`;
+  }; re-run the tool if needed]${tail}`;
 }
 
 /**
@@ -231,6 +335,7 @@ export function applyDecisions(
   calls: readonly ToolCall[],
   headChars: number,
   inputChars: number = 0,
+  tailChars: number = 0,
 ): Message[] {
   const byId = new Map(calls.map((call) => [call.id, call]));
   const plans = new Map<string, { action: CallDecision['action']; inputTruncated: boolean }>();
@@ -257,7 +362,7 @@ export function applyDecisions(
         if (!plan) return tool;
         const text =
           plan.action === 'drop_result'
-            ? truncatedResultText(tool.text ?? '', tool.isError ?? false, headChars)
+            ? truncatedResultText(tool.text ?? '', tool.isError ?? false, headChars, tailChars)
             : tool.text;
         const textChanged = plan.action === 'drop_result' && text !== (tool.text ?? '');
         const cut =
@@ -278,7 +383,7 @@ export function applyDecisions(
       .filter((result) => actionOf(result.tool_use_id) !== 'drop_call')
       .map((result) => {
         if (actionOf(result.tool_use_id) !== 'drop_result') return result;
-        const text = truncatedResultText(result.text, result.isError ?? false, headChars);
+        const text = truncatedResultText(result.text, result.isError ?? false, headChars, tailChars);
         return text === result.text
           ? result
           : {
@@ -346,8 +451,9 @@ export async function compact(
   const started = Date.now();
   const resolved = resolveOptions(options);
   const calls = collectToolCalls(messages, resolved.preserveRecentMessages);
+  const stale = supersededCalls(calls, resolved.alwaysKeepResult);
   const candidates = calls.filter(
-    (call) => !call.pinned && !matchesAny(resolved.alwaysKeepResult, call.tool),
+    (call) => !call.pinned && !stale.has(call.id) && !matchesAny(resolved.alwaysKeepResult, call.tool),
   );
   const charsBefore = messages.reduce((sum, message) => sum + messageChars(message), 0);
 
@@ -365,7 +471,9 @@ export async function compact(
   }
 
   const decisions = calls.map((call) =>
-    decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
+    stale.has(call.id)
+      ? decideSuperseded(call, resolved)
+      : decideCall(call, answers.get(call.id) ?? { keepCall: 1, keepResult: 1 }, resolved),
   );
   const kept = applyDecisions(
     messages,
@@ -373,6 +481,7 @@ export async function compact(
     calls,
     resolved.truncateHeadChars,
     resolved.truncateInputChars,
+    resolved.truncateTailChars,
   );
   return {
     messages: kept,
@@ -388,6 +497,7 @@ export async function compact(
       callsDropped: count(decisions, 'call_dropped'),
       pinned: count(decisions, 'pinned'),
       floored: count(decisions, 'floor'),
+      superseded: count(decisions, 'superseded'),
       inputsTruncated: decisions.filter((decision) => decision.inputTruncated).length,
       stateTokens: fitted.tokens,
       stateStage: fitted.stage,

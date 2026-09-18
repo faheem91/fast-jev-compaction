@@ -64,8 +64,12 @@ export interface CallDecision extends CallAnswer {
   id: string;
   tool: string;
   action: CallAction;
-  /** `floor`: the tool is in `alwaysKeepResult`, so the result stays and Jev was not asked. */
-  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped' | 'floor';
+  /**
+   * `floor`: the tool is in `alwaysKeepResult`, so the result stays and Jev was
+   * not asked. `superseded`: a later call made this one stale (the file was
+   * edited after the read, the same command ran again), decided in code.
+   */
+  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped' | 'floor' | 'superseded';
   /** The call stays but its long string inputs were cut to a head and a note. */
   inputTruncated: boolean;
 }
@@ -120,6 +124,8 @@ export interface CompactOptions {
   alwaysKeepCall?: string[];
   /** Regex sources over the tool name: the result always stays verbatim and Jev is not asked. Default []. */
   alwaysKeepResult?: string[];
+  /** Characters at the end of a dropped tool result to retain after the note (a command's verdict line). Default 0. */
+  truncateTailChars?: number;
 }
 
 export interface ResolvedCompactOptions {
@@ -130,6 +136,7 @@ export interface ResolvedCompactOptions {
   maxStateTokens: number;
   maxRequestTokens: number;
   truncateHeadChars: number;
+  truncateTailChars: number;
   truncateInputChars: number;
   alwaysKeepCall: RegExp[];
   alwaysKeepResult: RegExp[];
@@ -151,6 +158,8 @@ export interface CompactResult {
     pinned: number;
     /** Calls whose tool is in `alwaysKeepResult`. */
     floored: number;
+    /** Calls a later call made stale, decided in code without Jev. */
+    superseded: number;
     /** Calls kept with their long inputs cut. */
     inputsTruncated: number;
     stateTokens: number;

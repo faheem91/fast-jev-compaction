@@ -59,6 +59,7 @@ describe('hook config', () => {
       keepCallThreshold: 0.3,
       preserveRecentMessages: 8,
       truncateHeadChars: 400,
+      truncateTailChars: 200,
       truncateInputChars: 1500,
       compactAtPercent: 70,
       minReductionRatio: 0.25,

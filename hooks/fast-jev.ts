@@ -31,6 +31,7 @@ const BARIUM_DEFAULTS = {
   keepCallThreshold: 0.3,
   preserveRecentMessages: 8,
   truncateHeadChars: 400,
+  truncateTailChars: 200,
   truncateInputChars: 1500,
 } as const;
 const HOOK_DEFAULTS = {
@@ -83,6 +84,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     'maxStateTokens',
     'maxRequestTokens',
     'truncateHeadChars',
+    'truncateTailChars',
     'truncateInputChars',
   ] as const) {
     const value = options[key];
@@ -218,6 +220,7 @@ export function summarize(result: CompactResult): string {
     stats.callsDropped > 0 ? `${stats.callsDropped} call_dropped` : '',
     stats.pinned > 0 ? `${stats.pinned} pinned` : '',
     stats.floored > 0 ? `${stats.floored} floored` : '',
+    stats.superseded > 0 ? `${stats.superseded} superseded` : '',
     stats.inputsTruncated > 0 ? `${stats.inputsTruncated} inputs truncated` : '',
   ].filter(Boolean);
   return `${percent(reductionRatio(result))} reduction; ${
@@ -234,7 +237,7 @@ export function decisionLog(result: CompactResult): string {
       (d) =>
         `${d.id}:${d.tool}:${d.action}/call=${d.keepCall.toFixed(2)}/result=${d.keepResult.toFixed(2)}${
           d.keepInput !== undefined ? `/input=${d.keepInput.toFixed(2)}` : ''
-        }`,
+        }${d.reason === 'floor' || d.reason === 'superseded' ? `/${d.reason}` : ''}`,
     )
     .join(' ');
 }

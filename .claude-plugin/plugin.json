@@ -38,7 +38,13 @@
       "type": "string",
       "title": "Always keep result (JSON array of regex)",
       "description": "Tools whose result stays verbatim and is not asked about: paid or unrepeatable.",
-      "default": "[\"^(Agent|TaskOutput|WebFetch|WebSearch)$\", \"^mcp__(firecrawl|claude_ai_Ahrefs|fathom|claude_ai_Apollo_io|parallel|seo-research|higgsfield|claude_ai_Clay|qmd)__\"]"
+      "default": "[\"^(Agent|TaskOutput|WebFetch|WebSearch|AskUserQuestion)$\", \"^mcp__(firecrawl|claude_ai_Ahrefs|fathom|claude_ai_Apollo_io|parallel|seo-research|higgsfield|claude_ai_Clay|qmd)__\"]"
+    },
+    "truncateTailChars": {
+      "type": "number",
+      "title": "Truncated tool result tail",
+      "description": "Characters at the end of a truncated tool result kept after the note, so a command's verdict line survives.",
+      "default": 200
     },
     "preserveRecentMessages": {
       "type": "number",

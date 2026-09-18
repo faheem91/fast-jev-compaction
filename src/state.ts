@@ -82,6 +82,7 @@ export function collectToolCalls(
         callIndex,
         resultIndex: found.index,
         resultChars: found.result.text.length,
+        inputChars: inputLength(tool.input),
         isError: found.result.isError ?? false,
         pinned:
           isPinned(callIndex, messages.length, preserveRecentMessages) ||
@@ -90,6 +91,14 @@ export function collectToolCalls(
     }
   });
   return calls;
+}
+
+function inputLength(input: Record<string, unknown>): number {
+  try {
+    return JSON.stringify(input).length;
+  } catch {
+    return 0;
+  }
 }
 
 function inputText(input: Record<string, unknown>, limit: number): string {

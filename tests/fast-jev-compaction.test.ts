@@ -11,8 +11,10 @@ import {
   fitState,
   JevClient,
   parseJevResponse,
+  questionsFor,
   reductionRatio,
   resolveOptions,
+  truncateInput,
   type HistoryToolCall,
   type JevAsker,
   type JevQuestions,
@@ -89,6 +91,19 @@ describe('options', () => {
       preserveRecentMessages: 2,
       truncateHeadChars: 0,
     });
+  });
+
+  it('resolves keepCallThreshold to keepThreshold when unset', () => {
+    expect(resolveOptions({ keepThreshold: 0.6 }).keepCallThreshold).toBe(0.6);
+    expect(resolveOptions({ keepThreshold: 0.6, keepCallThreshold: 0.2 }).keepCallThreshold).toBe(0.2);
+    expect(resolveOptions().keepCallThreshold).toBe(0.5);
+  });
+
+  it('compiles floor pattern sources and rejects a bad one', () => {
+    expect(resolveOptions({ alwaysKeepCall: ['^(Write|Edit)$'] }).alwaysKeepCall[0]?.test('Edit')).toBe(true);
+    expect(resolveOptions().alwaysKeepResult).toEqual([]);
+    expect(resolveOptions().truncateInputChars).toBe(0);
+    expect(() => resolveOptions({ alwaysKeepResult: ['('] })).toThrow(/invalid alwaysKeepResult pattern/);
   });
 });
 
@@ -269,6 +284,13 @@ describe('decisions', () => {
     });
   });
 
+  it('drops a call only below keepCallThreshold', () => {
+    const opts = { keepThreshold: 0.5, keepCallThreshold: 0.3 };
+    expect(decideCall(unpinned, { keepCall: 0.4, keepResult: 0.2 }, opts).action).toBe('drop_result');
+    expect(decideCall(unpinned, { keepCall: 0.2, keepResult: 0.2 }, opts).action).toBe('drop_call');
+    expect(decideCall(unpinned, { keepCall: 0.4, keepResult: 0.2 }, { keepThreshold: 0.5 }).action).toBe('drop_call');
+  });
+
   it('removes dropped calls and truncates dropped results', () => {
     const messages = transcript();
     messages[4]!.toolUses[0]!.text = 'x'.repeat(2000);
@@ -429,5 +451,95 @@ describe('HTTP client', () => {
     await expect(
       compactMessages(transcript(), { apiKey: '', preserveRecentMessages: 1 }),
     ).rejects.toThrow(/TYPESAFE_API_KEY/);
+  });
+});
+
+describe('input truncation', () => {
+  const big = 'x'.repeat(5000);
+  const messages = (): Message[] => [
+    message('user', 'start'),
+    call('w', 'Write', { file_path: 'x.ts', content: big }, 'ok'),
+    result('w', 'ok'),
+    message('assistant', 'written'),
+  ];
+
+  it('asks the input question only above the limit and only when enabled', () => {
+    const calls = collectToolCalls(messages(), 0);
+    expect(calls[0]?.inputChars).toBeGreaterThan(5000);
+    expect(Object.keys(questionsFor(calls[0]!, { truncateInputChars: 1000 }))).toEqual(['call_t1', 'result_t1', 'input_t1']);
+    expect(Object.keys(questionsFor(calls[0]!, { truncateInputChars: 0 }))).toEqual(['call_t1', 'result_t1']);
+    expect(Object.keys(questionsFor(calls[0]!))).toEqual(['call_t1', 'result_t1']);
+    expect(Object.keys(questionsFor(calls[0]!, { truncateInputChars: 10_000 }))).toEqual(['call_t1', 'result_t1']);
+  });
+
+  it('cuts long string fields of a kept call when Jev says the input is stale', async () => {
+    const seen: Seen[] = [];
+    const input = messages();
+    const output = await compact(
+      input,
+      fakeJev((name) => (name.startsWith('input_') ? 0.1 : 0.9), seen),
+      { preserveRecentMessages: 1, truncateInputChars: 1000 },
+    );
+    expect(seen[0]?.questions).toContain('input_t1');
+    expect(output.decisions[0]).toMatchObject({ action: 'keep', inputTruncated: true, keepInput: 0.1 });
+    expect(output.stats.inputsTruncated).toBe(1);
+    const tool = output.messages[1]?.toolUses[0]!;
+    expect(output.messages[1]).not.toBe(input[1]);
+    expect(tool.input.file_path).toBe('x.ts');
+    expect(tool.input.content).toBe(`${'x'.repeat(1000)}\n[fast-jev-compaction truncated 4000 chars of this input; re-read the file if needed]`);
+    expect(output.messages[2]).toBe(input[2]);
+  });
+
+  it('leaves the input alone when Jev keeps it or when disabled', async () => {
+    const input = messages();
+    const kept = await compact(input, fakeJev(() => 0.9), { preserveRecentMessages: 1, truncateInputChars: 1000 });
+    expect(kept.messages[1]).toBe(input[1]);
+    expect(kept.decisions[0]?.inputTruncated).toBe(false);
+    const seen: Seen[] = [];
+    const off = await compact(input, fakeJev(() => 0.1, seen), { preserveRecentMessages: 1 });
+    expect(seen[0]?.questions).not.toContain('input_t1');
+    expect(off.decisions[0]?.keepInput).toBeUndefined();
+  });
+
+  it('truncates only string fields', () => {
+    const { input, changed } = truncateInput({ a: 'y'.repeat(30), n: 5, o: { k: 'z'.repeat(30) } }, 10);
+    expect(changed).toBe(true);
+    expect(input.n).toBe(5);
+    expect(input.o).toEqual({ k: 'z'.repeat(30) });
+    expect(String(input.a).startsWith('yyyyyyyyyy\n[fast-jev-compaction truncated 20 chars')).toBe(true);
+    expect(truncateInput({ a: 'short' }, 10).changed).toBe(false);
+  });
+});
+
+describe('tool floors', () => {
+  const floors = { keepThreshold: 0.5, keepCallThreshold: 0.3, alwaysKeepCall: [/^Bash$/], alwaysKeepResult: [/^Agent$/] };
+
+  it('never drops a floored call and never truncates a floored result', () => {
+    const bash = { id: 't1', tool: 'Bash', pinned: false };
+    const agent = { id: 't2', tool: 'Agent', pinned: false };
+    const read = { id: 't3', tool: 'Read', pinned: false };
+    expect(decideCall(bash, { keepCall: 0.1, keepResult: 0.1 }, floors)).toMatchObject({ action: 'drop_result', reason: 'result_dropped' });
+    expect(decideCall(agent, { keepCall: 0.1, keepResult: 0.1 }, floors)).toMatchObject({ action: 'keep', reason: 'floor' });
+    expect(decideCall(read, { keepCall: 0.1, keepResult: 0.1 }, floors).action).toBe('drop_call');
+  });
+
+  it('asks no questions about floored results and counts them', async () => {
+    const seen: Seen[] = [];
+    const messages = [
+      message('user', 'start'),
+      call('a', 'Agent', { prompt: 'research' }, 'report'),
+      result('a', 'report'),
+      call('r', 'Read', { file_path: 'a.ts' }, 'x'),
+      result('r', 'x'),
+      message('assistant', 'done'),
+    ];
+    const output = await compact(messages, fakeJev(() => 0.1, seen), {
+      preserveRecentMessages: 1,
+      alwaysKeepResult: ['^Agent$'],
+    });
+    expect(seen.flatMap((r) => r.questions)).toEqual(['call_t2', 'result_t2']);
+    expect(output.decisions.map((d) => d.reason)).toEqual(['floor', 'call_dropped']);
+    expect(output.stats).toMatchObject({ floored: 1, callsDropped: 1 });
+    expect(output.messages[1]).toBe(messages[1]);
   });
 });

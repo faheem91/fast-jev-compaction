@@ -42,6 +42,8 @@ export interface ToolCall {
   /** Index of the message holding the tool_result block. */
   resultIndex: number;
   resultChars: number;
+  /** Serialised input length, for the input question. */
+  inputChars: number;
   isError: boolean;
   /** In the first or the newest preserved messages; never a candidate. */
   pinned: boolean;
@@ -52,6 +54,8 @@ export interface CallAnswer {
   keepCall: number;
   /** Jev's probability that the full result still needs to stay verbatim. */
   keepResult: number;
+  /** Jev's probability that the full input still matters; absent when no input question was asked. */
+  keepInput?: number;
 }
 
 export type CallAction = 'keep' | 'drop_result' | 'drop_call';
@@ -60,7 +64,10 @@ export interface CallDecision extends CallAnswer {
   id: string;
   tool: string;
   action: CallAction;
-  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped';
+  /** `floor`: the tool is in `alwaysKeepResult`, so the result stays and Jev was not asked. */
+  reason: 'pinned' | 'kept' | 'result_dropped' | 'call_dropped' | 'floor';
+  /** The call stays but its long string inputs were cut to a head and a note. */
+  inputTruncated: boolean;
 }
 
 export interface HistoryToolCall {
@@ -105,15 +112,27 @@ export interface CompactOptions {
   maxRequestTokens?: number;
   /** Characters of a dropped tool result to retain. Default 300. */
   truncateHeadChars?: number;
+  /** Minimum keep probability for a call to stay when its result goes. Default: keepThreshold. */
+  keepCallThreshold?: number;
+  /** Ask Jev about inputs longer than this and cut them to this head when stale. 0 disables. Default 0. */
+  truncateInputChars?: number;
+  /** Regex sources over the tool name: the call line is never dropped (its result and input still may be). Default []. */
+  alwaysKeepCall?: string[];
+  /** Regex sources over the tool name: the result always stays verbatim and Jev is not asked. Default []. */
+  alwaysKeepResult?: string[];
 }
 
 export interface ResolvedCompactOptions {
   goal: string;
   keepThreshold: number;
+  keepCallThreshold: number;
   preserveRecentMessages: number;
   maxStateTokens: number;
   maxRequestTokens: number;
   truncateHeadChars: number;
+  truncateInputChars: number;
+  alwaysKeepCall: RegExp[];
+  alwaysKeepResult: RegExp[];
 }
 
 export interface CompactResult {
@@ -130,6 +149,10 @@ export interface CompactResult {
     resultsDropped: number;
     callsDropped: number;
     pinned: number;
+    /** Calls whose tool is in `alwaysKeepResult`. */
+    floored: number;
+    /** Calls kept with their long inputs cut. */
+    inputsTruncated: number;
     stateTokens: number;
     /** Which fitting stage the state needed, '' when no request was made. */
     stateStage: string;

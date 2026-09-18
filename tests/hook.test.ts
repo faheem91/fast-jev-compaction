@@ -3,6 +3,7 @@ import {
   compactSession,
   decisionLog,
   decisionLogLines,
+  patternList,
   resolveHookConfig,
   summarize,
   toSessionMessages,
@@ -52,19 +53,27 @@ function jevFetch(answer: (name: string) => number, bodies: string[] = []) {
 }
 
 describe('hook config', () => {
-  it('reads userConfig values and falls back to defaults', () => {
-    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest' });
+  it('applies the Barium defaults and reads userConfig values', () => {
+    expect(resolveHookConfig({})).toEqual({
+      keepThreshold: 0.5,
+      keepCallThreshold: 0.3,
+      preserveRecentMessages: 8,
+      truncateHeadChars: 400,
+      truncateInputChars: 1500,
+      compactAtPercent: 70,
+      minReductionRatio: 0.25,
+      model: 'jev-1.13.0',
+    });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no' }),
-    ).toEqual({
-      apiKey: 'k',
-      keepThreshold: 0.3,
-      maxStateTokens: 1000,
-      model: 'jev-x',
-      goal: 'g',
-      compactAtPercent: 60,
-      minReductionRatio: 0.25,
-    });
+    ).toMatchObject({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 70 });
+  });
+
+  it('parses the floor lists as JSON arrays of regex sources', () => {
+    expect(patternList({}, 'alwaysKeepCall')).toEqual([]);
+    expect(patternList({ alwaysKeepCall: '["^Bash$", "^mcp__"]' }, 'alwaysKeepCall')).toEqual(['^Bash$', '^mcp__']);
+    expect(() => patternList({ alwaysKeepCall: 'Bash' }, 'alwaysKeepCall')).toThrow(/JSON array/);
+    expect(() => patternList({ alwaysKeepCall: '[1]' }, 'alwaysKeepCall')).toThrow(/JSON array/);
   });
 });
 
@@ -125,6 +134,16 @@ describe('compactSession', () => {
     expect(summarize(output)).toMatch(/^\d+% reduction; 1 kept, 1 call_dropped; state ~\d+ tokens \(full\) in 1 request\(s\)$/);
     expect(decisionLog(output)).toBe('t1:Read:drop_call/call=0.10/result=0.10 t2:Bash:keep/call=0.90/result=0.90');
     expect(decisionLogLines(output)).toEqual([`decisions: ${decisionLog(output)}`]);
+    expect(summarize(output)).not.toMatch(/floored|inputs truncated/);
+  });
+
+  it('logs the input probability when it was asked', async () => {
+    const messages = transcript();
+    messages[1]!.toolUses[0]!.input = { file_path: 'src/a.ts', content: 'c'.repeat(3000) };
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1, truncateInputChars: 1000 }), apiKey: 'k' };
+    const { result: output } = await compactSession(messages, config, jevFetch((name) => (name.startsWith('input_') ? 0.2 : 0.9)));
+    expect(decisionLog(output)).toContain('t1:Read:keep/call=0.90/result=0.90/input=0.20');
+    expect(summarize(output)).toContain('1 inputs truncated');
   });
 
   it('splits a long decision log into ui.log lines under the host limit', async () => {

@@ -1,37 +1,61 @@
 {
   "name": "fast-jev-compaction",
   "version": "0.4.0",
-  "description": "Verbatim Jev-guided compaction for Claude Code sessions.",
+  "description": "Verbatim Jev-guided compaction for Claude Code sessions (Barium fork).",
   "license": "MIT",
   "userConfig": {
     "apiKey": {
       "type": "string",
       "title": "TypeSafe API key",
-      "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY.",
+      "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY from the environment.",
       "sensitive": true
     },
     "keepThreshold": {
       "type": "number",
       "title": "Keep threshold",
-      "description": "Minimum Jev probability that a tool call or tool result is still needed; below it the item is removed.",
+      "description": "Minimum Jev probability that a tool result (or a long input) is still needed verbatim; below it the item is truncated.",
       "default": 0.5
+    },
+    "keepCallThreshold": {
+      "type": "number",
+      "title": "Keep-call threshold",
+      "description": "Minimum Jev probability that a call line stays when its result goes. Lower than keepThreshold so calls are dropped only when Jev is fairly sure.",
+      "default": 0.3
+    },
+    "truncateInputChars": {
+      "type": "number",
+      "title": "Input truncation",
+      "description": "Inputs longer than this get a third Jev question and are cut to this head when stale. 0 disables.",
+      "default": 1500
+    },
+    "alwaysKeepCall": {
+      "type": "string",
+      "title": "Always keep call (JSON array of regex)",
+      "description": "Tools whose call line is never dropped; result and input still shrink. A compacted session must still know what it wrote, ran and sent.",
+      "default": "[\"^(Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell|Agent|SendMessage|Artifact|Skill)$\", \"^mcp__.*__.*(create|update|delete|send|set_|write|publish|post|move|add_|remove|merge|upload|execute|run_).*\"]"
+    },
+    "alwaysKeepResult": {
+      "type": "string",
+      "title": "Always keep result (JSON array of regex)",
+      "description": "Tools whose result stays verbatim and is not asked about: paid or unrepeatable.",
+      "default": "[\"^(Agent|TaskOutput|WebFetch|WebSearch)$\", \"^mcp__(firecrawl|claude_ai_Ahrefs|fathom|claude_ai_Apollo_io|parallel|seo-research|higgsfield|claude_ai_Clay|qmd)__\"]"
     },
     "preserveRecentMessages": {
       "type": "number",
       "title": "Recent messages to preserve",
       "description": "Number of newest messages pinned from compaction.",
-      "default": 6
+      "default": 8
     },
     "compactAtPercent": {
       "type": "number",
       "title": "Compaction percentage",
       "description": "Context percentage at which turn.complete requests compaction.",
-      "default": 60
+      "default": 70
     },
     "minReductionRatio": {
       "type": "number",
       "title": "Minimum reduction ratio",
-      "description": "Minimum estimated character reduction required to replace history.",
+      "description": "Minimum estimated character reduction required to replace history; below it the built-in summary runs.",
       "default": 0.25
     },
     "maxStateTokens": {
@@ -50,13 +74,13 @@
       "type": "number",
       "title": "Truncated tool result head",
       "description": "Characters of a tool result kept when Jev decides its full output is no longer needed; 0 keeps only the note.",
-      "default": 300
+      "default": 400
     },
     "model": {
       "type": "string",
       "title": "Jev model",
-      "description": "TypeSafe Jev model name.",
-      "default": "jev-latest"
+      "description": "TypeSafe Jev model name. Pinned; thresholds are tuned per version.",
+      "default": "jev-1.13.0"
     }
   }
 }

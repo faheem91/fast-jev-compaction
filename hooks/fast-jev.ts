@@ -9,7 +9,7 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
-import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
+import { buildJevRequest, parseJevResponse } from '../src/request.js';
 import type {
   CompactOptions,
   CompactResult,
@@ -19,10 +19,24 @@ import type {
   ToolUse,
 } from '../src/types.js';
 
+/**
+ * Barium defaults (the plugin.json defaults mirror these; the code carries
+ * them so an unset option still lands here): a result goes on a coin flip, a
+ * call only when Jev is fairly sure, long Write/Edit bodies get their own
+ * question, a Bash summary line survives a truncation, the last few round
+ * trips stay whole. Model pinned: thresholds are tuned per Jev version.
+ */
+const BARIUM_DEFAULTS = {
+  keepThreshold: 0.5,
+  keepCallThreshold: 0.3,
+  preserveRecentMessages: 8,
+  truncateHeadChars: 400,
+  truncateInputChars: 1500,
+} as const;
 const HOOK_DEFAULTS = {
-  compactAtPercent: 60,
+  compactAtPercent: 70,
   minReductionRatio: 0.25,
-  model: DEFAULT_MODEL,
+  model: 'jev-1.13.0',
 };
 
 export type HookFetchInit = {
@@ -59,13 +73,17 @@ function optionString(options: PluginOptions, key: string): string | undefined {
 
 /** Reads the plugin's `userConfig` values; anything missing takes the defaults. */
 export function resolveHookConfig(options: PluginOptions): HookConfig {
-  const numbers: Partial<Omit<CompactOptions, 'goal'>> = {};
+  const numbers: Partial<Omit<CompactOptions, 'goal' | 'alwaysKeepCall' | 'alwaysKeepResult'>> = {
+    ...BARIUM_DEFAULTS,
+  };
   for (const key of [
     'keepThreshold',
+    'keepCallThreshold',
     'preserveRecentMessages',
     'maxStateTokens',
     'maxRequestTokens',
     'truncateHeadChars',
+    'truncateInputChars',
   ] as const) {
     const value = options[key];
     if (typeof value === 'number' && Number.isFinite(value)) numbers[key] = value;
@@ -85,6 +103,22 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   const goal = optionString(options, 'goal');
   if (goal) config.goal = goal;
   return config;
+}
+
+/** A floor list option: a JSON array of regex sources, or unset. Parsed per compaction so a bad value falls back instead of breaking plugin load. */
+export function patternList(options: PluginOptions, key: string): string[] {
+  const value = options[key];
+  if (typeof value !== 'string' || value.trim() === '') return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error(`${key} must be a JSON array of regex sources`);
+  }
+  if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) {
+    throw new Error(`${key} must be a JSON array of regex sources`);
+  }
+  return parsed;
 }
 
 /** A `JevAsker` over the engine's `$.http.fetch`. */
@@ -183,6 +217,8 @@ export function summarize(result: CompactResult): string {
     stats.resultsDropped > 0 ? `${stats.resultsDropped} results truncated` : '',
     stats.callsDropped > 0 ? `${stats.callsDropped} call_dropped` : '',
     stats.pinned > 0 ? `${stats.pinned} pinned` : '',
+    stats.floored > 0 ? `${stats.floored} floored` : '',
+    stats.inputsTruncated > 0 ? `${stats.inputsTruncated} inputs truncated` : '',
   ].filter(Boolean);
   return `${percent(reductionRatio(result))} reduction; ${
     parts.join(', ') || 'no tool calls'
@@ -196,7 +232,9 @@ export function decisionLog(result: CompactResult): string {
     .filter((d) => d.reason !== 'pinned')
     .map(
       (d) =>
-        `${d.id}:${d.tool}:${d.action}/call=${d.keepCall.toFixed(2)}/result=${d.keepResult.toFixed(2)}`,
+        `${d.id}:${d.tool}:${d.action}/call=${d.keepCall.toFixed(2)}/result=${d.keepResult.toFixed(2)}${
+          d.keepInput !== undefined ? `/input=${d.keepInput.toFixed(2)}` : ''
+        }`,
     )
     .join(' ');
 }
@@ -260,9 +298,30 @@ export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
 
+  on('session.start', async ($, event, next) => {
+    try {
+      const key = await getApiKey($, configured);
+      $.ui.log(
+        key
+          ? `fast-jev-compaction: key present, Jev compaction armed (${configured.model})`
+          : 'fast-jev-compaction: no TYPESAFE_API_KEY, built-in summary in charge',
+      );
+    } catch (error) {
+      $.ui.log(
+        `fast-jev-compaction: key check failed (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+    return next(event);
+  });
+
   on('session.compact', async ($, event, next) => {
     try {
-      const config = { ...configured, apiKey: await getApiKey($, configured) };
+      const config: HookConfig = {
+        ...configured,
+        apiKey: await getApiKey($, configured),
+        alwaysKeepCall: patternList(options, 'alwaysKeepCall'),
+        alwaysKeepResult: patternList(options, 'alwaysKeepResult'),
+      };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };
